@@ -31,6 +31,56 @@ This is a Streamlit web application that demonstrates **Active Learning** (Human
 *   **Optimized Inference:** Uses fast batch encoding for Sentence Transformers to maximize processing speed.
 *   **Export:** Preview predictions, inspect the predicted category distribution, and download the results as a CSV.
 
+### 6. Model Performance Dashboard
+*   **Learning Curves:** Accuracy and F1 vs. number of labels for active learning, random sampling and your live labeling session.
+*   **Multi-Seed Benchmark:** Mean ± std learning curves for five sampling strategies over five seeds, with a summary table.
+*   **Confusion Matrix:** Interactive heatmap showing which categories the model confuses.
+
+---
+
+## 📊 Results
+
+**Full training set (8,795 labeled docs, TF-IDF, default settings):**
+
+| Model | Test Accuracy |
+|-------|--------------:|
+| Logistic Regression | 72.26% |
+| Multinomial Naive Bayes | 70.67% |
+
+**Active learning benchmark** (TF-IDF + Logistic Regression, 879 → 1,829 labels, 5 seeds, mean ± std):
+
+| Strategy | Final Accuracy (%) | Gain vs Random (pp) | Seeds Beating Random |
+|----------|---------------:|---------------:|:--------------------:|
+| Random | 63.86 ± 0.82 | — | — |
+| Least Confidence | 63.44 ± 0.73 | −0.42 | 1/5 |
+| Margin | 63.38 ± 1.02 | −0.47 | 1/5 |
+| Entropy | 62.83 ± 0.59 | −1.03 | 0/5 |
+| **Diverse Margin** | **64.07 ± 0.43** | **+0.22** | **4/5** |
+
+Pure uncertainty sampling did not beat random sampling on this dataset. Adding batch diversity (clustering the most uncertain documents and labeling one per cluster) was the only strategy to come out ahead, though the gain is within run-to-run variance.
+
+---
+
+## 📁 Project Structure
+
+```
+document_classifier/
+├── app.py                      # Streamlit app (UI + orchestration)
+├── src/
+│   ├── utils.py                # Preprocessing, explanations, highlighting, embeddings
+│   └── al_benchmark.py         # Multi-seed active learning benchmark
+├── notebooks/
+│   ├── explore_data.ipynb      # Class balance and sample documents
+│   ├── text_preprocess.ipynb   # Text cleaning -> preprocessed_data.pkl
+│   ├── feature_engineering.ipynb  # Train/test split + TF-IDF
+│   ├── baseline_model.ipynb    # Logistic Regression on 10% of labels
+│   ├── active_learning.ipynb   # Original single-run AL experiment
+│   └── analysis.ipynb          # Plots, reports, exported model
+├── *.pkl                       # Saved data, vectorizer, models and results
+├── requirements.txt
+└── run.bat                     # Windows launcher using the project venv
+```
+
 ---
 
 ## 🛠️ Installation & Setup
@@ -53,7 +103,7 @@ This is a Streamlit web application that demonstrates **Active Learning** (Human
 
 3.  **Install Dependencies:**
     ```bash
-    pip install -r requirement.txt
+    pip install -r requirements.txt
     ```
 
 4.  **Run the Web App:**
@@ -61,11 +111,17 @@ This is a Streamlit web application that demonstrates **Active Learning** (Human
     streamlit run app.py
     ```
 
+5.  **(Optional) Re-run the Multi-Seed Active Learning Benchmark:**
+    ```bash
+    python -m src.al_benchmark
+    ```
+    This compares Random, Least Confidence, Margin, Entropy and Diverse Margin sampling over 5 seeds and writes `al_benchmark_results.pkl`, which the **Model Performance** tab displays.
+
 ---
 
 ## 🔬 Technical Details
 
-*   **Dataset:** 20 Newsgroups corpus (10,994 documents split 80/20 into train/test sets).
+*   **Dataset:** 20 Newsgroups corpus with headers, footers and quotes removed (10,994 documents after cleaning, stratified 80/20 train/test split).
 *   **Feature Representations:**
     *   *TF-IDF Baseline:* Sparse vectors (5,000 max features, unigrams, min document frequency = 5).
     *   *Sentence Embeddings:* Dense vectors from `all-MiniLM-L6-v2` (cached locally to `X_train_emb.npy` and `X_test_emb.npy` after the first run to allow instant subsequent loading).

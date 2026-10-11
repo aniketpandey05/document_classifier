@@ -48,6 +48,9 @@ y_test*
 !active_learning_results.pkl
 !train_test_data.pkl
 !preprocessed_data.pkl
+!al_benchmark_results.pkl
 # Optional: ignore any train/test folders
 train/
 test/
+# Private interview prep notes (keep local only)
+INTERVIEW_README.md

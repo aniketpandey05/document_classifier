@@ -148,7 +148,12 @@ def get_top_features_for_category(model, vectorizer, category_idx, top_n=15):
     
     # Check if the model is MultinomialNB
     if hasattr(model, 'feature_log_prob_'):
-        coefs = model.feature_log_prob_[category_idx]
+        # Rank by log-odds vs the other classes; raw log-probs would just surface
+        # words that are common in every class (e.g. "would", "one").
+        log_probs = model.feature_log_prob_
+        n_classes = log_probs.shape[0]
+        mean_other = (np.sum(log_probs, axis=0) - log_probs[category_idx]) / (n_classes - 1)
+        coefs = log_probs[category_idx] - mean_other
     elif hasattr(model, 'coef_'):
         coefs = model.coef_
         if len(coefs.shape) > 1 and coefs.shape[0] > 1:

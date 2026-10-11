@@ -18,6 +18,8 @@ from sklearn.metrics import accuracy_score, f1_score
 
 import os
 
+from src.utils import preprocess_text
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 @st.cache_resource
@@ -46,16 +48,14 @@ def load_models():
     return model, vectorizer, info, results
 
 
-def preprocess_text(text, stop_words, lemmatizer):
-    text = text.lower()
-    text = re.sub(r'http\S+|www\S+', '', text)
-    text = re.sub(r'\S+@\S+', '', text)
-    text = re.sub(r'\d+', '', text)
-    text = re.sub(r'[^a-z\s]', '', text)
-    tokens = word_tokenize(text)
-    tokens = [w for w in tokens if w not in stop_words and len(w) > 2]
-    tokens = [lemmatizer.lemmatize(w) for w in tokens]
-    return ' '.join(tokens)
+@st.cache_resource
+def load_al_benchmark():
+    """Multi-seed AL benchmark produced by `python -m src.al_benchmark` (None if not generated yet)."""
+    path = os.path.join(BASE_DIR, 'al_benchmark_results.pkl')
+    if not os.path.exists(path):
+        return None
+    with open(path, 'rb') as f:
+        return pickle.load(f)
 
 
 @st.cache_resource
@@ -102,7 +102,9 @@ def recreate_model_instance(model_name, hyperparams):
         raise ValueError(f"Unknown model name: {model_name}")
 
 @st.cache_resource
-def get_trained_model(model_name, hyperparams, _X_train, _y_train):
+def get_trained_model(feature_set, model_name, hyperparams, _X_train, _y_train):
+    # _X_train/_y_train are not hashed (too large), so feature_set must be part
+    # of the cache key or a TF-IDF model would be reused for embeddings.
     clf = recreate_model_instance(model_name, hyperparams)
     clf.fit(_X_train, _y_train)
     return clf
@@ -185,7 +187,16 @@ def main():
     stop_words, lemmatizer = load_nltk_data()
     model_orig, vectorizer, info, results = load_models()
     categories = info['categories']
-    improvement = results['improvement']
+    benchmark = load_al_benchmark()
+    if benchmark is not None:
+        improvement = benchmark['best_gain_pp']
+        improvement_help = (
+            f"Best strategy ({benchmark['best_strategy']}) vs Random: mean final-accuracy "
+            f"difference over {len(benchmark['config']['seeds'])} seeds."
+        )
+    else:
+        improvement = results['improvement']
+        improvement_help = "Uncertainty sampling vs Random, single run."
 
     # Sidebar Model Selection (filtered by feature compatibility)
     st.sidebar.header("🛠️ Classifier Configuration")
@@ -232,7 +243,7 @@ def main():
         hyperparams['alpha'] = alpha_val
 
     # Dynamically train model based on sliders
-    model = get_trained_model(model_name, hyperparams, X_train_full, y_train_full)
+    model = get_trained_model(feature_set, model_name, hyperparams, X_train_full, y_train_full)
     
     # Evaluate custom model accuracy on test set
     y_pred_custom = model.predict(X_test)
@@ -244,12 +255,19 @@ def main():
     st.sidebar.header("📊 Current Model Stats")
     st.sidebar.metric("Test Accuracy", f"{custom_accuracy*100:.2f}%")
     st.sidebar.metric("Categories", len(categories))
-    st.sidebar.metric("Training Samples", f"{info['training_samples']:,}")
-    st.sidebar.metric("Vocabulary Size", f"{info['vocabulary_size']:,}")
+    st.sidebar.metric("Training Samples", f"{X_train_full.shape[0]:,}")
+    if feature_set == "TF-IDF Baseline":
+        st.sidebar.metric("Vocabulary Size", f"{X_train_full.shape[1]:,}")
+    else:
+        st.sidebar.metric("Embedding Dimensions", f"{X_train_full.shape[1]:,}")
 
     st.sidebar.markdown("---")
     st.sidebar.header("🎯 Active Learning Advantage")
-    st.sidebar.metric("Accuracy Gain", f"+{improvement:.2f}pp")
+    st.sidebar.metric(
+        "Accuracy Gain vs Random",
+        f"{improvement:+.2f}pp",
+        help=improvement_help
+    )
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Classify Text", "⚙️ Labeling Studio", "🔍 Feature Explorer", "📈 Model Performance", "ℹ️ About"])
 
@@ -304,7 +322,7 @@ def main():
                         title="Top 10 Category Probabilities",
                         height=300
                     )
-                    st.altair_chart(chart, use_container_width=True)
+                    st.altair_chart(chart, width='stretch')
 
                 # Explain prediction - Word Highlights
                 from src.utils import explain_prediction, explain_embeddings_prediction_loo, get_highlighted_html
@@ -376,15 +394,21 @@ def main():
                     status_text = st.empty()
 
                     if feature_set == "TF-IDF Baseline":
-                        for i, (idx, text_val) in enumerate(zip(valid_indices, valid_texts)):
-                            status_text.text(f"Processing row {idx + 1}/{total_rows}...")
-                            cleaned_val = preprocess_text(text_val, stop_words, lemmatizer)
-                            X_val = vectorizer.transform([cleaned_val])
-                            pred_val = model.predict(X_val)[0]
-                            prob_val = model.predict_proba(X_val)[0][pred_val]
-                            preds[idx] = categories[pred_val]
-                            confidences[idx] = prob_val * 100
-                            progress_bar.progress((idx + 1) / total_rows)
+                        cleaned_texts = []
+                        for i, text_val in enumerate(valid_texts):
+                            status_text.text(f"Preprocessing row {i + 1}/{len(valid_texts)}...")
+                            cleaned_texts.append(preprocess_text(text_val, stop_words, lemmatizer))
+                            progress_bar.progress((i + 1) / len(valid_texts))
+
+                        status_text.text("Classifying documents...")
+                        X_vals = vectorizer.transform(cleaned_texts)
+                        pred_vals = model.predict(X_vals)
+                        prob_vals = model.predict_proba(X_vals)
+
+                        for i, idx in enumerate(valid_indices):
+                            pred_idx = pred_vals[i]
+                            preds[idx] = categories[pred_idx]
+                            confidences[idx] = prob_vals[i][pred_idx] * 100
                     else:
                         status_text.text("Generating embeddings for batch...")
                         from src.utils import get_embeddings_model
@@ -425,7 +449,7 @@ def main():
                         color=alt.Color('Count:Q', scale=alt.Scale(scheme='blues', reverse=True), legend=None),
                         tooltip=['Category', 'Count']
                     ).properties(height=250)
-                    st.altair_chart(dist_chart, use_container_width=True)
+                    st.altair_chart(dist_chart, width='stretch')
 
                 csv_data = df_results.to_csv(index=False).encode('utf-8')
                 st.download_button(
@@ -672,18 +696,18 @@ def main():
 
             if not top_feat_df.empty:
                 top_feat_df = top_feat_df.sort_values(by="Weight", ascending=True)
-                weight_title = "Log Probability" if model_name == "Multinomial Naive Bayes" else "Coefficient (Weight)"
+                weight_title = "Log-Odds vs Other Classes" if model_name == "Multinomial Naive Bayes" else "Coefficient (Weight)"
                 
                 chart_feat = alt.Chart(top_feat_df).mark_bar(cornerRadiusEnd=4).encode(
                     x=alt.X('Weight:Q', title=weight_title),
                     y=alt.Y('Word:N', sort='-x', title='Word'),
-                    color=alt.Color('Weight:Q', scale=alt.Scale(scheme='blues', reverse=(model_name != "Multinomial Naive Bayes")), legend=None),
+                    color=alt.Color('Weight:Q', scale=alt.Scale(scheme='blues', reverse=True), legend=None),
                     tooltip=['Word', alt.Tooltip('Weight:Q', format='.4f')]
                 ).properties(
                     title=f"Top Influential Words for '{sel_cat_str}'",
                     height=450
                 )
-                st.altair_chart(chart_feat, use_container_width=True)
+                st.altair_chart(chart_feat, width='stretch')
             else:
                 st.warning("Model does not support coefficient extraction.")
 
@@ -729,7 +753,7 @@ def main():
                 title="Model Accuracy Comparison",
                 height=350
             ).interactive()
-            st.altair_chart(acc_chart, use_container_width=True)
+            st.altair_chart(acc_chart, width='stretch')
 
         with col2:
             f1_chart = alt.Chart(combined_df).mark_line(point=True).encode(
@@ -744,7 +768,67 @@ def main():
                 title="Model F1-Score Comparison",
                 height=350
             ).interactive()
-            st.altair_chart(f1_chart, use_container_width=True)
+            st.altair_chart(f1_chart, width='stretch')
+
+        st.markdown("---")
+        st.subheader("🧪 Multi-Seed Strategy Benchmark")
+        if benchmark is None:
+            st.info("Run `python -m src.al_benchmark` to generate the multi-seed benchmark.")
+        else:
+            cfg = benchmark['config']
+            st.markdown(
+                f"Each strategy was run with **{len(cfg['seeds'])} different seeds** "
+                f"(different starting labeled sets), {cfg['n_rounds']} rounds × {cfg['batch_size']} labels, "
+                f"using {cfg['model']} on {cfg['features']}. Lines show the **mean** accuracy and the shaded "
+                "band shows **± 1 standard deviation** across seeds. If two bands overlap heavily, the "
+                "difference between those strategies is within run-to-run noise."
+            )
+
+            band_df = benchmark['curves'].groupby(['strategy', 'n_labeled'])['accuracy'].agg(['mean', 'std']).reset_index()
+            band_df['Mean (%)'] = band_df['mean'] * 100
+            band_df['Lower'] = (band_df['mean'] - band_df['std']) * 100
+            band_df['Upper'] = (band_df['mean'] + band_df['std']) * 100
+            band_df = band_df.rename(columns={'strategy': 'Strategy'})
+
+            strategy_color = alt.Color('Strategy:N', sort=cfg['strategies'])
+            band = alt.Chart(band_df).mark_area(opacity=0.15).encode(
+                x=alt.X('n_labeled:Q', title='Number of Labeled Samples'),
+                y=alt.Y('Lower:Q', title='Accuracy (%)', scale=alt.Scale(zero=False)),
+                y2='Upper:Q',
+                color=strategy_color
+            )
+            line = alt.Chart(band_df).mark_line(point=True).encode(
+                x='n_labeled:Q',
+                y='Mean (%):Q',
+                color=strategy_color,
+                tooltip=['Strategy', 'n_labeled',
+                         alt.Tooltip('Mean (%):Q', format='.2f'),
+                         alt.Tooltip('std:Q', format='.4f', title='Std (fraction)')]
+            )
+            st.altair_chart(
+                (band + line).properties(title="Accuracy vs Labels (mean ± std over seeds)", height=400).interactive(),
+                width='stretch'
+            )
+
+            summary = benchmark['summary']
+            table = pd.DataFrame({
+                'Final Accuracy (%)': [f"{m*100:.2f} ± {s*100:.2f}" for m, s in zip(summary['final_acc_mean'], summary['final_acc_std'])],
+                'Final Macro-F1 (%)': (summary['final_macro_f1_mean'] * 100).round(2),
+                'AULC (%)': [f"{m*100:.2f} ± {s*100:.2f}" for m, s in zip(summary['aulc_mean'], summary['aulc_std'])],
+                'Gain vs Random (pp)': [
+                    "—" if pd.isna(m) else f"{m:+.2f} ± {s:.2f}"
+                    for m, s in zip(summary['mean_gain_pp'], summary['std_gain_pp'])
+                ],
+                'Seeds Beating Random': [
+                    "—" if pd.isna(v) else f"{int(v)}/{len(cfg['seeds'])}" for v in summary['seeds_beating_random']
+                ],
+            }, index=summary.index)
+            st.dataframe(table, width='stretch')
+            st.caption(
+                "AULC = area under the learning curve (mean accuracy over all rounds); it rewards strategies "
+                "that learn fast early, not just at the end. Gain vs Random is paired by seed, so both runs "
+                "start from the same labeled set."
+            )
 
         st.markdown("---")
         st.subheader("🎯 Confusion Matrix Heatmap")
@@ -774,7 +858,7 @@ def main():
                 title="Confusion Matrix Heatmap (Baseline Model)",
                 height=500
             )
-            st.altair_chart(cm_chart, use_container_width=True)
+            st.altair_chart(cm_chart, width='stretch')
 
     with tab5:
         st.header("About")
