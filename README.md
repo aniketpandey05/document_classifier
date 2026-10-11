@@ -87,7 +87,7 @@ document_classifier/
 
 1.  **Clone the Repository:**
     ```bash
-    git clone https://github.com/rogueslasher/document_classifier.git
+    git clone https://github.com/aniketpandey05/document_classifier.git
     cd document_classifier
     ```
 
